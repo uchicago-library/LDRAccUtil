@@ -5,6 +5,9 @@ from argparse import ArgumentParser
 from os import scandir, remove
 from hashlib import md5 as _md5
 from uuid import uuid4
+from configparser import ConfigParser
+from os import curdir, environ
+from os.path import expanduser
 
 import requests
 
@@ -18,8 +21,6 @@ __version__ = "0.0.1dev"
 
 # TODO
 # Thread the POSTs
-# - config handling: Flask-like?
-#     - ease of grabbing callbacks written in configs?
 
 def launch():
     """
@@ -50,6 +51,30 @@ def md5(path, buff=1024*1000*8):
     return hasher.hexdigest()
 
 
+def get_config(config_file=None):
+    """
+    Grab the config CLI --> env var --> typical locations
+    """
+    config = ConfigParser()
+    if config_file:
+        config.read(config_file)
+        return config
+    elif environ.get("ACCUTIL_CONFIG"):
+        config.read(environ.get("ACCUTIL_CONFIG"))
+        return config
+    for x in [
+        curdir,
+        expanduser("~"),
+        str(Path(expanduser("~"), ".config")),
+        str(Path(expanduser("~"), ".config", "accutil")),
+        "/etc", str(Path("/etc", "accutil"))
+    ]:
+        if Path(x, "accutil.conf").is_file():
+            config.read(str(Path(x, "accutil.conf")))
+            return config
+    return ConfigParser()
+
+
 class AccUtil:
     def main(self):
         # Instantiate boilerplate parser
@@ -76,7 +101,7 @@ class AccUtil:
             "buffer location manually_. If the location you are addressing " +
             "is bigger than your buffering location, not passing this " +
             "argument can result in your disk being filled.",
-            action='store_true', default=False
+            action='store_true', default=None
         )
         parser.add_argument(
             "--buffer_location", help="A location on disk to save " +
@@ -88,7 +113,7 @@ class AccUtil:
             "--buff", help="How much data to load into RAM in one go for " +
             "various operations. Currently the maximum for this should be " +
             "~2*n bits in RAM, with n specified in this arg.",
-            type=int, action='store', default=1024*1000*8
+            type=int, action='store', default=None
         )
         # TODO: Generate some kind of receipt for this to read
         parser.add_argument(
@@ -107,25 +132,51 @@ class AccUtil:
             "use to exclude files whose rel paths match.",
             action='append', default=[]
         )
-        # TODO: Make it possible to toss this in a conf
         parser.add_argument(
             "--ingress_url", help="The url of the ingress service.",
-            action='store'
+            action='store', default=None
         )
         # Parse arguments into args namespace
         args = parser.parse_args()
 
-        # TODO: Argument validation?
-
         # App code
+        config = get_config()
+
+        # Argument handling
         target = Path(args.target)
         self.filters = [re_compile(x) for x in args.filter_pattern]
         self.acc_id = args.accession_id
-        self.ingress_url = args.ingress_url
-        self.buffer_location = args.buffer_location
-        self.buff = args.buff
-        self.running_buffer_delete = args.running_buffer_delete
+        if args.ingress_url:
+            self.ingress_url = args.ingress_url
+        elif config["DEFAULT"].get("INGRESS_URL"):
+            self.ingress_url = config["DEFAULT"].get("INGRESS_URL")
+        else:
+            raise RuntimeError("No ingress url specified at CLI or in a conf!")
 
+        if args.buffer_location:
+            self.buffer_location = args.buffer_location
+        elif config["DEFAULT"].get("BUFFER_LOCATION"):
+            self.buffer_location = config["DEFAULT"].get("BUFFER_LOCATION")
+        else:
+            self.buffer_location = None
+
+        if isinstance(args.running_buffer_delete, bool):
+            self.running_buffer_delete = args.running_buffer_delete
+        elif isinstance(config["DEFAULT"].getboolean(
+                "RUNNING_BUFFER_DELETE"), bool):
+            self.running_buffer_delete = config["DEFAULT"].getboolean(
+                "RUNNING_BUFFER_DELETE")
+        else:
+            self.running_buffer_delete = False
+
+        if isinstance(args.buff, int):
+            self.buff = args.buff
+        elif isinstance(config["DEFAULT"].getint("BUFF"), int):
+            self.buff = config["DEFAULT"].getint("BUFF")
+        else:
+            self.buff = 1024*1000*8
+
+        # Real work
         if target.is_file():
             r = self.ingest_file(target, args.source_root)
         elif target.is_dir():
