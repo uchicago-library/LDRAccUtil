@@ -37,8 +37,8 @@ def rscandir(path="."):
             yield from rscandir(entry.path)
 
 
-def sanitize_name(some_path):
-    return some_path
+def sanitize_path(some_path):
+    return bytes(some_path).hex()
 
 
 def md5(path, buff=1024*1000*8):
@@ -196,11 +196,11 @@ class AccUtil:
         # Compute our originalName from the path, considering it relative to a
         # root if one was provided
         if root is not None:
-            originalName = str(path.relative_to(root))
+            originalName = path.relative_to(root)
         else:
-            originalName = str(path)
+            originalName = path
         # TODO: Need to do byte escaping here in the callback
-        data['originalName'] = sanitize_name(originalName)
+        data['name'] = sanitize_path(originalName)
 
         # If a buffer location is specified, copy the file to there straight
         # away so we don't stress the original media. Then confirm the copy if
@@ -210,14 +210,14 @@ class AccUtil:
         precomputed_md5 = None
         if self.buffer_location is not None:
             tmp_path = str(Path(self.buffer_location, uuid4().hex))
-            with open(str(path), 'rb') as src:
+            with open(bytes(path), 'rb') as src:
                 with open(tmp_path, 'wb') as dst:
                     d = src.read(self.buff)
                     while d:
                         dst.write(d)
                         d = src.read(self.buff)
             precomputed_md5 = md5(tmp_path, self.buff)
-            if not precomputed_md5 == md5(str(path), self.buff):
+            if not precomputed_md5 == md5(bytes(path), self.buff):
                 print("Emit a warning about a bad copy from origin media here.")
             path = Path(tmp_path)
 
@@ -225,17 +225,17 @@ class AccUtil:
         if precomputed_md5:
             data['md5'] = precomputed_md5
         else:
-            data['md5'] = md5(str(path), self.buff)
+            data['md5'] = md5(bytes(path), self.buff)
 
-        # Package up our open file opbject
-        files = {'file': open(str(path), 'rb')}
-
-        # Ship the whole package off to the ingress microservice
-        resp = requests.post(
-            self.ingress_url,
-            data=data,
-            files=files
-        )
+        # Package up our open file object
+        with path.open("rb") as fd:
+            files = {'file': fd}
+            # Ship the whole package off to the ingress microservice
+            resp = requests.post(
+                self.ingress_url,
+                data=data,
+                files=files
+            )
 
         # Be sure what we got back is a-okay
         resp.raise_for_status()
@@ -250,14 +250,13 @@ class AccUtil:
         # If we buffered the file into safe storage somewhere in addition to the
         # origin media remove it now
         if self.buffer_location is not None and self.running_buffer_delete:
-            print("Removing {}".format(str(path)))
-            remove(str(path))
+            remove(bytes(path))
         return resp_json
 
     def ingest_dir(self, path, root=None, filters=[]):
         # Enforce filters, delegate to the ingest_file() method
         r = []
-        for x in rscandir(str(path)):
+        for x in rscandir(bytes(path)):
             if x.is_file():
                 skip = False
                 for f in filters:
