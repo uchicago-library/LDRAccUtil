@@ -17,6 +17,7 @@ __version__ = "0.0.1dev"
 
 
 # TODO
+# Thread the POSTs
 # - config handling: Flask-like?
 #     - ease of grabbing callbacks written in configs?
 
