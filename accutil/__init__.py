@@ -6,8 +6,9 @@ from os import scandir, remove
 from hashlib import md5 as _md5
 from uuid import uuid4
 from configparser import ConfigParser
-from os import curdir, environ
+from os import curdir, environ, fsencode
 from os.path import expanduser
+from multiprocessing.pool import ThreadPool
 
 import requests
 
@@ -18,9 +19,6 @@ __company__ = "The University of Chicago Library"
 __publication__ = ""
 __version__ = "0.0.1dev"
 
-
-# TODO
-# Thread the POSTs
 
 def launch():
     """
@@ -73,6 +71,78 @@ def get_config(config_file=None):
             config.read(str(Path(x, "accutil.conf")))
             return config
     return ConfigParser()
+
+
+def ingest_file(*args):
+    path = args[0]
+    ingress_url = args[1]
+    acc_id = args[2]
+    buffer_location = args[3]
+    buff = args[4]
+    root = args[5]
+    running_buffer_delete = args[6]
+    # Start building the data dict we're going to throw at the endpoint.
+    data = {}
+    data['accession_id'] = acc_id
+    # Compute our originalName from the path, considering it relative to a
+    # root if one was provided
+    if root is not None:
+        originalName = path.relative_to(root)
+    else:
+        originalName = path
+    # TODO: Need to do byte escaping here in the callback
+    data['name'] = sanitize_path(fsencode(originalName))
+
+    # If a buffer location is specified, copy the file to there straight
+    # away so we don't stress the original media. Then confirm the copy if
+    # possible (otherwise emit a warning) and work with that copy from
+    # there.
+    # TODO: Handling of partial reads?
+    precomputed_md5 = None
+    if buffer_location is not None:
+        tmp_path = str(Path(buffer_location, uuid4().hex))
+        with open(path, 'rb') as src:
+            with open(tmp_path, 'wb') as dst:
+                d = src.read(buff)
+                while d:
+                    dst.write(d)
+                    d = src.read(buff)
+        precomputed_md5 = md5(tmp_path, buff)
+        if not precomputed_md5 == md5(path, buff):
+            print("Emit a warning about a bad copy from origin media here.")
+        path = Path(tmp_path)
+
+    # Re-use our hash of the buffer location if we have it precomputed.
+    if precomputed_md5:
+        data['md5'] = precomputed_md5
+    else:
+        data['md5'] = md5(path, buff)
+
+    # Package up our open file object
+    with open(path, "rb") as fd:
+        files = {'file': fd}
+        # Ship the whole package off to the ingress microservice
+        resp = requests.post(
+            ingress_url,
+            data=data,
+            files=files
+        )
+
+    # Be sure what we got back is a-okay
+    resp.raise_for_status()
+    resp_json = resp.json()
+
+    # If we made a "new" accession, store the minted acc id for future files
+    # processed as a part of this run.
+    if resp_json['acc_output'].get('acc_mint'):
+        acc_id = \
+            resp_json['acc_output']['acc_mint']['Minted'][0]['identifier']
+
+    # If we buffered the file into safe storage somewhere in addition to the
+    # origin media remove it now
+    if buffer_location is not None and running_buffer_delete:
+        remove(path)
+    return resp_json
 
 
 class AccUtil:
@@ -144,6 +214,7 @@ class AccUtil:
 
         # Argument handling
         target = Path(args.target)
+        self.root = args.source_root
         self.filters = [re_compile(x) for x in args.filter_pattern]
         self.acc_id = args.accession_id
         if args.ingress_url:
@@ -178,10 +249,10 @@ class AccUtil:
 
         # Real work
         if target.is_file():
-            r = self.ingest_file(target, args.source_root)
+            r = self.ingest_file(str(target))
         elif target.is_dir():
             r = self.ingest_dir(
-                target, args.source_root,
+                str(target), args.source_root,
                 [re_compile(x) for x in args.filter_pattern]
             )
         else:
@@ -189,74 +260,17 @@ class AccUtil:
         # TODO: Clean up output
         print(dumps(r, indent=4))
 
-    def ingest_file(self, path, root=None):
-        # Start building the data dict we're going to throw at the endpoint.
-        data = {}
-        data['accession_id'] = self.acc_id
-        # Compute our originalName from the path, considering it relative to a
-        # root if one was provided
-        if root is not None:
-            originalName = path.relative_to(root)
-        else:
-            originalName = path
-        # TODO: Need to do byte escaping here in the callback
-        data['name'] = sanitize_path(originalName)
-
-        # If a buffer location is specified, copy the file to there straight
-        # away so we don't stress the original media. Then confirm the copy if
-        # possible (otherwise emit a warning) and work with that copy from
-        # there.
-        # TODO: Handling of partial reads?
-        precomputed_md5 = None
-        if self.buffer_location is not None:
-            tmp_path = str(Path(self.buffer_location, uuid4().hex))
-            with open(bytes(path), 'rb') as src:
-                with open(tmp_path, 'wb') as dst:
-                    d = src.read(self.buff)
-                    while d:
-                        dst.write(d)
-                        d = src.read(self.buff)
-            precomputed_md5 = md5(tmp_path, self.buff)
-            if not precomputed_md5 == md5(bytes(path), self.buff):
-                print("Emit a warning about a bad copy from origin media here.")
-            path = Path(tmp_path)
-
-        # Re-use our hash of the buffer location if we have it precomputed.
-        if precomputed_md5:
-            data['md5'] = precomputed_md5
-        else:
-            data['md5'] = md5(bytes(path), self.buff)
-
-        # Package up our open file object
-        with path.open("rb") as fd:
-            files = {'file': fd}
-            # Ship the whole package off to the ingress microservice
-            resp = requests.post(
-                self.ingress_url,
-                data=data,
-                files=files
-            )
-
-        # Be sure what we got back is a-okay
-        resp.raise_for_status()
-        resp_json = resp.json()
-
-        # If we made a "new" accession, store the minted acc id for future files
-        # processed as a part of this run.
-        if resp_json['acc_output'].get('acc_mint'):
-            self.acc_id = \
-                resp_json['acc_output']['acc_mint']['Minted'][0]['identifier']
-
-        # If we buffered the file into safe storage somewhere in addition to the
-        # origin media remove it now
-        if self.buffer_location is not None and self.running_buffer_delete:
-            remove(bytes(path))
-        return resp_json
+    def ingest_file(self, path):
+        return ingest_file(
+            path, self.ingress_url, self.acc_id,
+            self.buffer_location, self.buff, self.root,
+            self.running_buffer_delete
+        )
 
     def ingest_dir(self, path, root=None, filters=[]):
         # Enforce filters, delegate to the ingest_file() method
-        r = []
-        for x in rscandir(bytes(path)):
+        file_list = []
+        for x in rscandir(path):
             if x.is_file():
                 skip = False
                 for f in filters:
@@ -264,8 +278,19 @@ class AccUtil:
                         skip = True
                 if skip:
                     continue
-                r.append(self.ingest_file(Path(x.path), root=root))
-        return r
+                file_list.append(x.path)
+        # We have to do one first, in order to be sure our accession isn't being
+        # created new
+        first_one = file_list.pop()
+        resp = self.ingest_file(first_one)
+        if resp['acc_output'].get('acc_mint'):
+            self.acc_id = \
+                resp['acc_output']['acc_mint']['Minted'][0]['identifier']
+        pool = ThreadPool(100)
+        p_result = pool.map(self.ingest_file, file_list)
+        p_result.insert(0, resp)
+
+        return p_result
 
 
 if __name__ == "__main__":
