@@ -40,6 +40,7 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     install_requires = [
-        'requests'
+        'requests>0',
+        'requests-toolbelt'
     ]
 )

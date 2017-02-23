@@ -11,6 +11,7 @@ from os.path import expanduser
 from multiprocessing.pool import ThreadPool
 
 import requests
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 
 __author__ = "Brian Balsamo"
@@ -47,6 +48,20 @@ def md5(path, buff=1024*1000*8):
             hasher.update(data)
             data = f.read(buff)
     return hasher.hexdigest()
+
+
+def mint_acc(acc_endpoint):
+    acc_create_response = requests.post(
+        acc_endpoint
+    )
+    acc_create_response.raise_for_status()
+    acc_create_json = acc_create_response.json()
+    return acc_create_json['Minted'][0]['identifier']
+
+
+def check_acc_exists(acc_endpoint, acc_id):
+    target_acc_url = acc_endpoint+acc_id + "/"
+    return requests.head(target_acc_url).status_code == 200
 
 
 def get_config(config_file=None):
@@ -120,12 +135,15 @@ def ingest_file(*args):
 
     # Package up our open file object
     with open(path, "rb") as fd:
-        files = {'file': fd}
+        data['file'] = ('file', fd)
+        ingress_post_multipart_encoder = MultipartEncoder(data)
         # Ship the whole package off to the ingress microservice
         resp = requests.post(
             ingress_url,
-            data=data,
-            files=files
+            data=ingress_post_multipart_encoder,
+            headers={"Content-Type":
+                     ingress_post_multipart_encoder.content_type},
+            stream=True
         )
 
     # Be sure what we got back is a-okay
@@ -206,6 +224,10 @@ class AccUtil:
             "--ingress_url", help="The url of the ingress service.",
             action='store', default=None
         )
+        parser.add_argument(
+            "--accessions_url", help="The url of the accessions idnest.",
+            action='store', default=None
+        )
         # Parse arguments into args namespace
         args = parser.parse_args()
 
@@ -221,6 +243,13 @@ class AccUtil:
             self.ingress_url = args.ingress_url
         elif config["DEFAULT"].get("INGRESS_URL"):
             self.ingress_url = config["DEFAULT"].get("INGRESS_URL")
+        else:
+            raise RuntimeError("No ingress url specified at CLI or in a conf!")
+
+        if args.accessions_url:
+            self.acc_endpoint = args.accessions_url
+        elif config["DEFAULT"].get("ACCESSIONS_URL"):
+            self.acc_endpoint = config["DEFAULT"].get("ACCESSIONS_URL")
         else:
             raise RuntimeError("No ingress url specified at CLI or in a conf!")
 
@@ -248,6 +277,16 @@ class AccUtil:
             self.buff = 1024*1000*8
 
         # Real work
+
+        # If our acc id is given as "new" create a new one, check to be sure it
+        # exists regardless and if it doesn't raise an error
+        if self.acc_id == "new":
+            self.acc_id = mint_acc(self.acc_endpoint)
+        if not check_acc_exists(self.acc_endpoint, self.acc_id):
+            raise RuntimeError("That acc doesn't exist! " +
+                               "(or there was a problem creating a new " +
+                               "accession identifier)")
+
         if target.is_file():
             r = self.ingest_file(str(target))
         elif target.is_dir():
@@ -281,14 +320,8 @@ class AccUtil:
                 file_list.append(x.path)
         # We have to do one first, in order to be sure our accession isn't being
         # created new
-        first_one = file_list.pop()
-        resp = self.ingest_file(first_one)
-        if resp['acc_output'].get('acc_mint'):
-            self.acc_id = \
-                resp['acc_output']['acc_mint']['Minted'][0]['identifier']
-        pool = ThreadPool(100)
+        pool = ThreadPool(50)
         p_result = pool.map(self.ingest_file, file_list)
-        p_result.insert(0, resp)
 
         return p_result
 
