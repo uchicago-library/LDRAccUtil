@@ -318,8 +318,6 @@ class AccUtil:
                 if skip:
                     continue
                 file_list.append(x.path)
-        # We have to do one first, in order to be sure our accession isn't being
-        # created new
         pool = ThreadPool(50)
         p_result = pool.map(self.ingest_file, file_list)
 
