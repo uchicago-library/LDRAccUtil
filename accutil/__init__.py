@@ -11,7 +11,7 @@ from os.path import expanduser
 from multiprocessing.pool import ThreadPool
 import logging
 from datetime import datetime
-from random import randint
+#from random import randint
 
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder
@@ -114,10 +114,10 @@ def ingest_file(*args):
 
     try:
 # faking failures for debugging
-        if randint(0, 1) == 0:
-            msg = "This is a test error!"
-            log.critical(msg)
-            raise RuntimeError(msg)
+#        if randint(0, 1) == 0:
+#            msg = "This is a test error!"
+#            log.critical(msg)
+#            raise RuntimeError(msg)
         # Start building the data dict we're going to throw at the endpoint.
         data = {}
         data['accession_id'] = acc_id
