@@ -124,7 +124,7 @@ def ingest_file(*args):
         # Compute our originalName from the path, considering it relative to a
         # root if one was provided
         if root is not None:
-            originalName = path.relative_to(root)
+            originalName = str(Path(path).relative_to(root))
         else:
             originalName = path
         data['name'] = sanitize_path(fsencode(originalName))
